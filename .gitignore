@@ -1,0 +1,14 @@
+.venv/
+.env
+.ussync/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+demo-library/
+demo-state/
+*.part
+*.md
+!README.md
