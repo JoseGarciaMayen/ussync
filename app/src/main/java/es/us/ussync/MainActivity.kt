@@ -860,7 +860,7 @@ private fun Settings(
         } } }
 
         item { SettingsSection({ SyncIcon(MaterialTheme.colorScheme.primary, Modifier.size(20.dp)) }, "Consultas automáticas", "Gestión inteligente") }
-        val intervals = listOf("0" to "Solo manualmente") + (if (BuildConfig.DEBUG) listOf("1" to "Cada minuto · Depuración") else emptyList()) + listOf("60" to "Cada hora", "360" to "Cada 6 horas", "1440" to "Una vez al día")
+        val intervals = listOf("0" to "Solo manualmente", "60" to "Cada hora", "360" to "Cada 6 horas", "1440" to "Una vez al día")
         val hourOptions = (0..23).map { it.toString() to "%02d:00".format(it) }
         val quietStart = settings["quiet_hours_start"]?.toIntOrNull()?.takeIf { it in 0..23 }
         val quietEnd = settings["quiet_hours_end"]?.toIntOrNull()?.takeIf { it in 0..23 }
@@ -876,7 +876,6 @@ private fun Settings(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             SettingsToggleRow("Evitar batería baja", "Pausa las consultas automáticas cuando Android indica poca carga.", settings["battery_not_low"] != "false", { setting("battery_not_low", it.toString()) })
         } } }
-        if (settings["scan_minutes"] == "1") item { Text("Depuración: Android puede retrasar la consulta; se respetan las condiciones de red y batería.", style = MaterialTheme.typography.bodySmall) }
 
         item { SettingsSection({ DotIcon(MaterialTheme.colorScheme.primary, Modifier.size(20.dp)) }, "Notificaciones") }
         item { EditorialCard { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
