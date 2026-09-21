@@ -1,51 +1,89 @@
 # USSync
 
-USSync mantiene tu biblioteca universitaria desde Android. El teléfono consulta Enseñanza Virtual y SEVIUS, detecta novedades, aplica tus decisiones y descarga los documentos a una carpeta elegida por ti. Syncthing replica esa carpeta en el PC y la tablet. El PC no necesita estar encendido para iniciar sesión, escanear, decidir, descargar o recibir avisos.
+[![Checks](https://github.com/JoseGarciaMayen/ussync/actions/workflows/checks.yml/badge.svg)](https://github.com/JoseGarciaMayen/ussync/actions/workflows/checks.yml)
+[![Release](https://img.shields.io/github/v/release/JoseGarciaMayen/ussync?label=Descargar%20APK&logo=android)](https://github.com/JoseGarciaMayen/ussync/releases/latest)
+
+USSync es una aplicación nativa para Android diseñada para sincronizar de forma autónoma los materiales universitarios de la Universidad de Sevilla (Enseñanza Virtual / Blackboard Learn y SEVIUS).
+
+El teléfono consulta los portales de la universidad en segundo plano, detecta novedades o actualizaciones de apuntes, aplica tus reglas de descarga y guarda los documentos organizados en la carpeta que elijas (por ejemplo, para replicarla en tu PC o tablet con Syncthing).
+
+*Read this in English: [English README](README_EN.md)*
 
 ```mermaid
 flowchart TD
-  EV[Enseñanza Virtual] --> A[USSync Android]
-  SE[SEVIUS] --> A
-  A --> N[Novedades y reglas]
-  N --> L[Biblioteca Universidad/]
-  L --> S[Syncthing]
-  S --> PC[PC]
-  S --> T[Tablet]
+  EV["Enseñanza Virtual (Blackboard)"] --> A["USSync (Android)"]
+  SE["SEVIUS (Docencia)"] --> A
+  A --> N["Novedades y Reglas"]
+  A --> U["Auto-actualizador (GitHub Releases)"]
+  N --> L["Carpeta Local (SAF)"]
+  L -.-> S["Syncthing (Opcional)"]
+  S -.-> PC["PC"]
+  S -.-> T["Tablet"]
 ```
 
-El desarrollo Android se ha iniciado en la Fase 1. La aplicación Python existente permanece como implementación de referencia (`legacy/reference` conceptual): no es el dispositivo principal ni recibirá nuevas funciones de producto.
+---
 
-## Qué sincroniza Syncthing
+## Características principales
 
-Comparte solamente la carpeta de biblioteca seleccionada, por ejemplo `/storage/emulated/0/Universidad`. Configura Syncthing Android para observar esa carpeta y añade PC/tablet como dispositivos remotos. USSync no usa la API de Syncthing ni necesita conocer su configuración.
+- **Autenticación segura:** Inicio de sesión mediante WebView oficial de la US (SSO y MFA). USSync nunca solicita ni almacena tus credenciales o contraseña; la sesión se gestiona con cookies locales protegidas en el dispositivo.
+- **Soporte de publicación condicional:** Detección de reglas de publicación adaptativa (*Adaptive Release*) en Blackboard. Si un archivo aún no está abierto (por ejemplo, zips de problemas con fecha futura), la app muestra la fecha y hora exacta en la que estará disponible sin dar errores 404.
+- **Gestión inteligente de novedades:** Detección de archivos nuevos, modificados y eliminados. Los archivos desaparecidos de la plataforma docente nunca se borran de tu almacenamiento local.
+- **Reglas personalizables y filtros:**
+  - Descarga automática, preguntar o ignorar por asignatura, carpeta, extensión o tamaño máximo en MB.
+  - Bloqueo de extensiones específicas (vídeos pesados, audios, etc.) para ahorrar espacio y datos móviles.
+- **Protección de apuntes anotados:** Si editas o anotas un PDF localmente, su hash cambia; si el profesor publica una versión nueva del documento, USSync no sobrescribe tus notas, sino que descarga la revisión conservando tus archivos.
+- **Sincronización en segundo plano:** Integración con Android WorkManager con opciones de frecuencia, ahorro de batería, restricción de solo Wi-Fi y pausa en horario nocturno.
+- **Actualizaciones automáticas:** El instalador integrado comprueba GitHub Releases, descarga las nuevas versiones con barra de progreso y solicita la actualización directamente en tu dispositivo sin necesidad de entrar a navegadores o descargar manualmente.
 
-No compartas la base de datos de USSync, cookies, tokens, sesiones, credenciales, bloqueos ni temporales. Todos viven en el almacenamiento privado Android. El backup de USSync tampoco lleva esos datos sensibles.
+---
 
-## Funcionamiento previsto
+## Descarga e Instalación
 
-Durante el onboarding eliges la biblioteca mediante el selector de árbol de Android (Storage Access Framework). USSync conserva el permiso persistente para esa carpeta. Después abres el login oficial de la Universidad de Sevilla dentro de un WebView: SSO y MFA se completan ahí; USSync nunca pide ni guarda tu contraseña. La sesión se comprueba con la API de perfil de Blackboard y se usa localmente para las consultas REST.
+1. Descarga la última versión de **[USSync.apk](https://github.com/JoseGarciaMayen/ussync/releases/latest)** desde GitHub Releases.
+2. Ábrela en tu teléfono Android y autoriza la instalación desde tu gestor de archivos o navegador.
+3. Concede el permiso para buscar e instalar actualizaciones si la app te lo solicita. Las futuras versiones se notificarán y actualizarán directamente desde la propia app.
 
-Cada escaneo consulta solo metadatos. Compara el catálogo previo y clasifica cada documento como NEW, UPDATED, UNCHANGED o REMOVED. Que desaparezca de la fuente no borra su copia local. NEW y UPDATED llegan a **Novedades** una sola vez por revisión, donde puedes descargar, ignorar o dejar para más tarde.
+---
 
-Las reglas tienen prioridad y pueden filtrar por asignatura, carpeta, fuente, extensión, texto, tamaño y tipo de novedad. Su acción es AUTO_DOWNLOAD, ASK, IGNORE o NOTIFY_ONLY; la opción inicial es ASK. También se crean desde una novedad con «Recordar esta decisión» para esa carpeta, asignatura, extensión o archivos similares.
+## Replicación con PC o Tablet (Opcional)
 
-Las descargas se hacen por streaming, se validan, calculan SHA-256 y se publican solo al estar completas. Si Syncthing trae un PDF anotado desde otro dispositivo, su hash ya no coincide con el que guardó USSync. Ante una actualización del profesor, la decisión inicial conserva ese PDF y descarga la nueva versión aparte en `Versiones/`; nunca se sobrescriben silenciosamente apuntes del usuario.
+Si utilizas Syncthing u otro sistema de sincronización entre dispositivos:
+1. En USSync, selecciona la carpeta de tu biblioteca (por ejemplo en tu almacenamiento interno o tarjeta SD) mediante el selector de carpetas de Android (SAF).
+2. Configura Syncthing para compartir exclusivamente esa carpeta con tu PC o tablet.
+3. No compartas la base de datos interna ni la caché de la aplicación; todos los datos de sesión y configuración permanecen protegidos en el almacenamiento privado de USSync.
 
-WorkManager permite escanear con la frecuencia y condiciones elegidas. Android puede aplazar esos trabajos para ahorrar batería, por lo que 15 minutos es una preferencia, no una promesa de ejecución exacta. Las notificaciones agrupan las novedades y abren directamente esa pantalla.
+---
 
-## Estado del repositorio
+## Compilación para desarrolladores
 
-| Área | Estado |
-| --- | --- |
-| Arquitectura, directorios Android y build base | Fase 1 completada |
-| Login WebView y prueba `/users/me` | Fase 2 pendiente |
-| EV, Room, novedades, descargas, reglas y workers | Fases posteriores |
-| SEVIUS, SAF, backup y pulido | Fases posteriores |
+El proyecto es una aplicación nativa para Android desarrollada en Kotlin y Jetpack Compose.
 
-El diseño, esquema Room, autenticación, riesgos y mapa de migración están en [docs/ANDROID_ARCHITECTURE.md](docs/ANDROID_ARCHITECTURE.md).
+### Requisitos:
+- Android Studio Ladybug / Koala o superior.
+- JDK 17 (`JAVA_HOME`).
+- Android SDK 35.
 
-## Proyecto Android
+### Comandos útiles:
 
-El módulo nativo está en `app/`, con Kotlin, Jetpack Compose, Room, OkHttp, WorkManager, WebView y SAF previstos como dependencias. Se requiere Android Studio con JDK 17 y un SDK Android 35 para compilarlo.
+- **Ejecutar pruebas unitarias:**
+  ```bash
+  ./gradlew testDebugUnitTest
+  ```
+- **Compilar APK de depuración:**
+  ```bash
+  ./gradlew assembleDebug
+  ```
+- **Compilar APK de lanzamiento (Release):**
+  ```bash
+  ./gradlew assembleRelease
+  ```
+- **Instalar en un dispositivo conectado por ADB:**
+  ```bash
+  ./android-install.sh
+  ```
 
-USSync es un proyecto independiente, sin afiliación oficial a la Universidad de Sevilla. No incluyas sesiones, credenciales, configuraciones personales ni material docente real en el repositorio.
+---
+
+## Aviso legal
+
+USSync es un desarrollo libre e independiente, sin vinculación institucional ni respaldo oficial por parte de la Universidad de Sevilla. El código fuente no almacena material docente, credenciales ni información privada.

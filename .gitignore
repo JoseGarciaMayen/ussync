@@ -16,6 +16,7 @@ app/build/
 local.properties
 *.md
 !README.md
+!README_EN.md
 !docs/
 !docs/**
 !android/
