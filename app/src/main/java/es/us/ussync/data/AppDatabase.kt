@@ -294,6 +294,9 @@ interface CatalogDao {
     @Query("UPDATE inbox_items SET state = :state, resolvedAt = :resolvedAt WHERE id = :id")
     suspend fun updateInboxState(id: Long, state: String, resolvedAt: String? = null)
 
+    @Query("UPDATE inbox_items SET state = :state, resolvedAt = :resolvedAt WHERE documentKey IN (:keys) AND state IN ('PENDING', 'LATER', 'READY')")
+    suspend fun resolveInboxByDocumentKeys(keys: Collection<String>, state: String = "DOWNLOADED", resolvedAt: String? = null)
+
     @Transaction
     suspend fun recordEvScan(
         documents: List<EvDocument>,
@@ -344,6 +347,12 @@ interface CatalogDao {
         observations(changes.map { (document, kind) ->
             DocumentObservationEntity(scanId = scanId, documentKey = document.key, classification = kind.name)
         })
+        val resolvedKeys = changes.filter { (doc, kind) ->
+            kind == ChangeKind.UNCHANGED && (doc.key in alreadyDownloadedKeys || existing[doc.key]?.lastDownloadedHash != null)
+        }.map { it.first.key }.toSet()
+        if (resolvedKeys.isNotEmpty()) {
+            resolveInboxByDocumentKeys(resolvedKeys, "DOWNLOADED", now)
+        }
         for ((document, kind) in changes.filter { it.second != ChangeKind.UNCHANGED }) {
             if (isBlockedExtension(document.filename, blockedExtensions)) continue
             if (pendingInboxId(document.key, document.revision) == null) {

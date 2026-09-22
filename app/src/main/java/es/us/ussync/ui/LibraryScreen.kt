@@ -219,6 +219,8 @@ fun LibraryScreen(
         ?: LibraryListing(path, emptyList(), emptyMap(), FolderStats(0, 0, 0))
     val loading = shown.entries.isEmpty()
 
+    val decodedEvUris = remember(evUris) { evUris.map { Uri.decode(it) }.toSet() }
+
     val ignoredByUri = ignored.filter { it.localUri != null }.associateBy { it.localUri!! }
 
     // Records under a folder. Child document URIs extend the parent URI with "%2F" or "/";
@@ -353,7 +355,7 @@ fun LibraryScreen(
             items(visible, key = { it.uri }) { entry ->
                 val record = records.firstOrNull { it.targetUri == entry.uri }
                 val isIgnored = if (entry.folder) folderIgnoreRuleFor(entry.name) != null else ignoredByUri.containsKey(entry.uri)
-                val inEv = entry.folder || entry.uri in evUris
+                val inEv = entry.folder || entry.uri in evUris || Uri.decode(entry.uri) in decodedEvUris
                 EditorialCard(Modifier.fillMaxWidth().clickable(enabled = !busy) {
                     if (entry.folder) { path = path + entry.name; query = "" } else onOpen(Uri.parse(entry.uri))
                 }) { Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {

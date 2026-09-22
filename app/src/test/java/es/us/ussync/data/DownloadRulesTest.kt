@@ -38,4 +38,10 @@ class DownloadRulesTest {
         assertFalse(isBlockedExtension("Clase.pdf", blocked))
         assertFalse(isBlockedExtension("sin-extension", blocked))
     }
+
+    @Test fun normalizeForMatchingHandlesAccentsPunctuationAndCase() {
+        assertEquals("fisicageneral", normalizeForMatching("Física General"))
+        assertEquals("1050012algebrai", normalizeForMatching("1050012 - Álgebra I"))
+        assertEquals("tema1ejercicios2024pdf", normalizeForMatching("Tema 1: Ejercicios [2024].pdf"))
+    }
 }
