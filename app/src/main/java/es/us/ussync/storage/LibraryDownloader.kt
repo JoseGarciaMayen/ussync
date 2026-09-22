@@ -46,6 +46,17 @@ class LibraryDownloader(
         return copyToDocument(temporary, parent, name, receivedHash)
     }
 
+    fun findFile(treeUri: String, courseName: String, path: List<String>, filename: String): DocumentFile? {
+        val root = DocumentFile.fromTreeUri(context, Uri.parse(treeUri)) ?: return null
+        if (!root.exists() || !root.canRead()) return null
+        var current: DocumentFile = root.findFile(safeName(courseName)) ?: return null
+        for (segment in path) {
+            current = current.findFile(safeName(segment)) ?: return null
+        }
+        val file = current.findFile(safeName(filename)) ?: return null
+        return if (file.exists() && file.isFile) file else null
+    }
+
     private fun directory(parent: DocumentFile, name: String): DocumentFile =
         parent.findFile(name) ?: requireNotNull(parent.createDirectory(name))
 
@@ -69,19 +80,21 @@ class LibraryDownloader(
         return if (dot > 0) "${name.substring(0, dot)} [$suffix].${name.substring(dot + 1)}" else "$name [$suffix]"
     }
 
-    private fun safeName(name: String) = name.replace(Regex("[\\\\/:*?\"<>|]"), "-").take(120).ifBlank { "Sin título" }
-
-    private fun digest(file: File): String = file.inputStream().use { input ->
+    fun digest(file: DocumentFile): String = resolver.openInputStream(file.uri)!!.use { input ->
         val hash = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(128 * 1024)
         while (true) { val read = input.read(buffer); if (read < 0) break; hash.update(buffer, 0, read) }
         hash.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun digest(file: DocumentFile): String = resolver.openInputStream(file.uri)!!.use { input ->
-        val hash = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(128 * 1024)
-        while (true) { val read = input.read(buffer); if (read < 0) break; hash.update(buffer, 0, read) }
-        hash.digest().joinToString("") { "%02x".format(it) }
+    companion object {
+        fun safeName(name: String) = name.replace(Regex("[\\\\/:*?\"<>|]"), "-").take(120).ifBlank { "Sin título" }
+
+        fun digest(file: File): String = file.inputStream().use { input ->
+            val hash = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(128 * 1024)
+            while (true) { val read = input.read(buffer); if (read < 0) break; hash.update(buffer, 0, read) }
+            hash.digest().joinToString("") { "%02x".format(it) }
+        }
     }
 }

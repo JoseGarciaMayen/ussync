@@ -295,7 +295,13 @@ interface CatalogDao {
     suspend fun updateInboxState(id: Long, state: String, resolvedAt: String? = null)
 
     @Transaction
-    suspend fun recordEvScan(documents: List<EvDocument>, scannedIds: List<String> = documents.map { it.key.split(":").getOrElse(1) { "" } }.distinct(), forcePendingKeys: Set<String> = emptySet(), blockedExtensions: Set<String> = emptySet()): ChangeSummary {
+    suspend fun recordEvScan(
+        documents: List<EvDocument>,
+        scannedIds: List<String> = documents.map { it.key.split(":").getOrElse(1) { "" } }.distinct(),
+        forcePendingKeys: Set<String> = emptySet(),
+        blockedExtensions: Set<String> = emptySet(),
+        alreadyDownloadedKeys: Set<String> = emptySet(),
+    ): ChangeSummary {
         val now = Instant.now().toString()
         val scanId = startScan(ScanEntity(startedAt = now, source = "EV"))
         val existing = documents.takeIf { it.isNotEmpty() }?.let { docs ->
@@ -305,6 +311,7 @@ interface CatalogDao {
             val before = existing[document.key]
             val kind = when {
                 document.key in forcePendingKeys -> ChangeKind.NEW
+                document.key in alreadyDownloadedKeys -> ChangeKind.UNCHANGED
                 before == null -> ChangeKind.NEW
                 before.revision != document.revision || before.size != document.size ||
                     before.filename != document.filename || before.relativePath != document.path.joinToString("/") -> ChangeKind.UPDATED
@@ -314,6 +321,7 @@ interface CatalogDao {
         }
         upsertDocuments(documents.map { document ->
             val before = existing[document.key]
+            val isRecognized = document.key in alreadyDownloadedKeys
             RemoteDocumentEntity(
                 key = document.key,
                 source = "EV",
@@ -326,8 +334,8 @@ interface CatalogDao {
                 firstSeen = before?.firstSeen ?: now,
                 lastSeen = now,
                 remoteAvailable = true,
-                lastDownloadedHash = before?.lastDownloadedHash,
-                lastDownloadedRevision = before?.lastDownloadedRevision,
+                lastDownloadedHash = before?.lastDownloadedHash ?: if (isRecognized) "" else null,
+                lastDownloadedRevision = before?.lastDownloadedRevision ?: if (isRecognized) document.revision else null,
                 availableFrom = document.availableFrom ?: before?.availableFrom,
             )
         })

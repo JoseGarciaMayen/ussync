@@ -133,7 +133,10 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             if (!forceDownload) SyncLocks.scan.withLock {
                 val documents = client.documents(user, courses.map { EvCourse(it.remoteId, it.name, it.remoteId, it.folder) })
                 val missingDownloads = catalog.reconcileMissingDownloads(applicationContext)
-                catalog.recordEvScan(documents, courses.map { it.remoteId }, missingDownloads, blocked)
+                val libraryTree = catalog.setting("library_tree_uri")
+                val courseFolders = courses.mapNotNull { c -> c.folder?.let { c.remoteId to it } }.toMap()
+                val existingFiles = catalog.reconcileExistingLibraryFiles(applicationContext, libraryTree, documents, courseFolders)
+                catalog.recordEvScan(documents, courses.map { it.remoteId }, missingDownloads, blocked, existingFiles)
                 catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
             }
             val rules = catalog.savedRules()

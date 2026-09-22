@@ -17,6 +17,7 @@ import es.us.ussync.data.isBlockedExtension
 import es.us.ussync.data.matches
 import es.us.ussync.data.parseExtensionList
 import es.us.ussync.data.reconcileMissingDownloads
+import es.us.ussync.data.reconcileExistingLibraryFiles
 import es.us.ussync.storage.LibraryDownloader
 import es.us.ussync.storage.LibraryLocationStore
 import kotlinx.coroutines.Dispatchers
@@ -748,8 +749,11 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
             es.us.ussync.sync.SyncLocks.scan.withLock {
             val documents = blackboardClient.documents(current.user, selected)
             val missingDownloads = catalog.reconcileMissingDownloads(getApplication<Application>())
+            val libraryTree = catalog.setting("library_tree_uri")
+            val courseFolders = selected.mapNotNull { c -> c.folder?.let { c.id to it } }.toMap()
+            val existingFiles = catalog.reconcileExistingLibraryFiles(getApplication<Application>(), libraryTree, documents, courseFolders)
             val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
-            val changes = catalog.recordEvScan(documents, selected.map { it.id }, missingDownloads, blocked)
+            val changes = catalog.recordEvScan(documents, selected.map { it.id }, missingDownloads, blocked, existingFiles)
             catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
             current.copy(
                 documents = documents,
