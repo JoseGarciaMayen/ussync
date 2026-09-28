@@ -18,8 +18,15 @@ import es.us.ussync.data.matches
 import es.us.ussync.data.parseExtensionList
 import es.us.ussync.data.reconcileMissingDownloads
 import es.us.ussync.data.reconcileExistingLibraryFiles
+import es.us.ussync.data.cleanCourseName
+import es.us.ussync.data.normalizeForMatching
+import es.us.ussync.data.subjectInitials
 import es.us.ussync.storage.LibraryDownloader
 import es.us.ussync.storage.LibraryLocationStore
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +41,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -41,10 +50,12 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.io.File
+import org.jsoup.Jsoup
 
 private const val EV_HOST = "ev.us.es"
 private const val EV_ORIGIN = "https://$EV_HOST"
@@ -87,6 +98,125 @@ data class EvDocument(
     val size: Long?,
     val availableFrom: String? = null,
 )
+
+internal fun resolveItemParents(parents: List<String>, title: String): List<String> {
+    val cleanTitle = title.trim()
+    val lastParent = parents.lastOrNull()?.trim()
+    return if (cleanTitle.isBlank() ||
+        cleanTitle.equals("ultraDocumentBody", ignoreCase = true) ||
+        cleanTitle.equals(lastParent, ignoreCase = true)
+    ) {
+        parents
+    } else {
+        parents + cleanTitle
+    }
+}
+
+internal fun extensionForMimeType(mimeType: String): String? = when (mimeType.trim().lowercase()) {
+    "application/pdf" -> ".pdf"
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> ".pptx"
+    "application/vnd.ms-powerpoint" -> ".ppt"
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> ".docx"
+    "application/msword" -> ".doc"
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> ".xlsx"
+    "application/vnd.ms-excel" -> ".xls"
+    "application/zip", "application/x-zip-compressed" -> ".zip"
+    "application/x-ipynb+json" -> ".ipynb"
+    "image/png" -> ".png"
+    "image/jpeg", "image/jpg" -> ".jpg"
+    "text/plain" -> ".txt"
+    else -> null
+}
+
+internal fun resolveFilename(
+    displayName: String,
+    linkName: String,
+    innerText: String,
+    mimeType: String,
+    webdavPath: String,
+): String {
+    var name = displayName.trim().ifBlank { linkName.trim() }.ifBlank { innerText.trim() }
+    if (name.isBlank()) {
+        name = webdavPath.substringAfterLast('/').ifBlank { "documento" }
+    }
+    val hasExtension = Regex("""\.[a-zA-Z0-9]{2,5}$""").containsMatchIn(name)
+    if (!hasExtension) {
+        val linkExt = Regex("""\.[a-zA-Z0-9]{2,5}$""").find(linkName.trim())?.value
+        if (linkExt != null) {
+            name = name.trimEnd('.', ' ') + linkExt
+        } else {
+            val mimeExt = extensionForMimeType(mimeType)
+            if (mimeExt != null) {
+                name = name.trimEnd('.', ' ') + mimeExt
+            }
+        }
+    }
+    name = name.replace(Regex("""\s+\."""), ".")
+    return LibraryDownloader.safeName(name)
+}
+
+internal fun extractEmbeddedDocuments(
+    course: EvCourse,
+    contentId: String,
+    parents: List<String>,
+    revision: String?,
+    availableFrom: String?,
+    bodyHtml: String,
+): List<EvDocument> {
+    if (bodyHtml.isBlank() || !bodyHtml.contains("bbcswebdav")) return emptyList()
+    val documents = mutableListOf<EvDocument>()
+    val seenPaths = mutableSetOf<String>()
+
+    val soup = Jsoup.parse(bodyHtml)
+    val links = soup.select("a")
+    for (link in links) {
+        val bbfileAttr = link.attr("data-bbfile")
+        val href = link.attr("href").trim()
+        val bbfile = if (bbfileAttr.isNotBlank()) {
+            runCatching { JSONObject(bbfileAttr) }.getOrNull()
+        } else null
+
+        val viewerUrl = bbfile?.optString("viewerUrl").orEmpty().trim()
+        val rawUrl = href.ifBlank { viewerUrl }
+        if (!rawUrl.contains("/bbcswebdav/")) continue
+
+        val webdavPath = when {
+            rawUrl.startsWith("/bbcswebdav/") -> rawUrl.substringBefore('?')
+            rawUrl.contains("/bbcswebdav/") -> runCatching {
+                rawUrl.toHttpUrl().encodedPath
+            }.getOrNull()
+            else -> null
+        } ?: continue
+
+        if (!seenPaths.add(webdavPath)) continue
+
+        val displayName = bbfile?.optString("displayName").orEmpty()
+        val linkName = bbfile?.optString("linkName").orEmpty()
+        val innerText = link.text()
+        val mimeType = bbfile?.optString("mimeType").orEmpty()
+
+        val filename = resolveFilename(
+            displayName = displayName,
+            linkName = linkName,
+            innerText = innerText,
+            mimeType = mimeType,
+            webdavPath = webdavPath,
+        )
+
+        val encodedPath = URLEncoder.encode(webdavPath, StandardCharsets.UTF_8.name())
+        val key = "ev:${course.id}:$contentId:webdav_$encodedPath"
+        documents += EvDocument(
+            key = key,
+            courseName = course.name,
+            path = parents,
+            filename = filename,
+            revision = revision,
+            size = null,
+            availableFrom = availableFrom,
+        )
+    }
+    return documents
+}
 
 internal sealed interface ProfileResult {
     data class Valid(val user: EvUser) : ProfileResult
@@ -136,7 +266,14 @@ internal class EvProfileClient(
 }
 
 internal class BlackboardClient(
-    private val client: OkHttpClient = OkHttpClient.Builder().addInterceptor(WebViewCookieInterceptor()).build(),
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 32
+            maxRequestsPerHost = 16
+        })
+        .addInterceptor(WebViewCookieInterceptor())
+        .build(),
 ) {
     private fun page(url: okhttp3.HttpUrl): String {
         require(EvEndpoints.isTrusted(url.toString()))
@@ -205,96 +342,166 @@ internal class BlackboardClient(
             .sortedBy { it.name.lowercase() }
     }
 
-    fun documents(user: EvUser, courses: List<EvCourse>): List<EvDocument> {
-        val result = mutableListOf<EvDocument>()
+    suspend fun documents(user: EvUser, courses: List<EvCourse>, dao: es.us.ussync.data.CatalogDao? = null): List<EvDocument> = coroutineScope {
+        courses.map { course ->
+            async(Dispatchers.IO) {
+                scanCourse(user, course, dao)
+            }
+        }.awaitAll().flatten()
+    }
+
+    private suspend fun scanCourse(user: EvUser, course: EvCourse, dao: es.us.ussync.data.CatalogDao? = null): List<EvDocument> {
+        val result = java.util.concurrent.ConcurrentLinkedDeque<EvDocument>()
         val folders = setOf("resource/x-bb-folder", "resource/x-bb-lesson", "resource/x-bb-module")
-        for (course in courses) {
-            val courseId = URLEncoder.encode(course.id, StandardCharsets.UTF_8.name())
-            data class Pending(
-                val url: okhttp3.HttpUrl,
-                val parents: List<String>,
-                val isChildrenRequest: Boolean,
-            )
-            val pending = ArrayDeque<Pending>()
-            pending += Pending(
-                "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents".toHttpUrl(),
-                emptyList(),
-                false,
-            )
-            val visited = mutableSetOf<String>()
-            while (pending.isNotEmpty()) {
-                val request = pending.removeLast()
-                val items = try {
-                    paged(request.url)
-                } catch (error: IllegalStateException) {
-                    if (request.isChildrenRequest && (
-                            error.message.orEmpty().contains("HTTP 400") ||
-                                error.message.orEmpty().contains("HTTP 404")
-                        )
-                    ) {
-                        continue
-                    }
-                    throw error
-                }
-                for (item in items) {
-                    val contentId = item.optString("id")
-                    if (contentId.isBlank() || !visited.add(contentId)) continue
-                    val title = item.optString("title", "Contenido")
-                    val handler = item.optJSONObject("contentHandler")?.optString("id").orEmpty()
-                    val isFolder = handler in folders || handler.contains("folder") || handler.contains("lesson")
-                    val encodedContent = URLEncoder.encode(contentId, StandardCharsets.UTF_8.name())
-                    // No todos los contenedores usan x-bb-folder/lesson/module. Algunos, como
-                    // las áreas de teoría, exponen hijos con otro handler pero conservan hasChildren.
-                    if (hasChildren(item)) {
-                        pending += Pending(
-                            "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents/$encodedContent/children".toHttpUrl(),
-                            request.parents + title,
-                            true,
-                        )
-                    }
-                    if (isFolder || handler.contains("externallink") || handler.contains("blti")) continue
-                    val available = item.optJSONObject("availability")?.optString("available")
-                    var availableFrom = extractAvailableFrom(item)
-                    if (availableFrom == null && (available == "PartiallyVisible" || item.optString("visibility") == "PARTIALLY_VISIBLE")) {
-                        availableFrom = runCatching {
-                            val detailUrl = "$EV_ORIGIN/learn/api/v1/courses/$courseId/contents/$encodedContent".toHttpUrl()
-                            val detail = JSONObject(page(detailUrl))
-                            extractAvailableFrom(detail)
-                        }.getOrNull()
-                    }
-                    val attachmentUrl = "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents/$encodedContent/attachments".toHttpUrl()
-                    try {
-                        for (attachment in paged(attachmentUrl)) {
-                            val attachmentId = attachment.optString("id")
-                            if (attachmentId.isBlank()) continue
-                            val name = attachment.optString("fileName").ifBlank {
-                                attachment.optString("name", attachmentId)
+        val courseId = URLEncoder.encode(course.id, StandardCharsets.UTF_8.name())
+
+        // Caché diferencial: contentId → (modified, childrenFetched)
+        val cacheMap: Map<String, es.us.ussync.data.ContentCacheEntity> = dao
+            ?.contentCacheForCourse(course.id)
+            ?.associateBy { it.contentId }
+            .orEmpty()
+        // Documentos ya conocidos para esta asignatura (para la verificación conservadora)
+        val knownContentIds: Set<String> = if (dao != null) {
+            dao.allAvailableDocuments()
+                .filter { it.courseId == course.id }
+                .map { it.key.split(":").getOrElse(2) { "" } }
+                .filter { it.isNotBlank() }
+                .toSet()
+        } else emptySet()
+        val cacheUpdates = java.util.concurrent.ConcurrentLinkedDeque<es.us.ussync.data.ContentCacheEntity>()
+
+        data class Pending(
+            val url: okhttp3.HttpUrl,
+            val parents: List<String>,
+            val isChildrenRequest: Boolean,
+        )
+        val queue = java.util.concurrent.ConcurrentLinkedDeque<Pending>()
+        queue += Pending(
+            "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents".toHttpUrl(),
+            emptyList(),
+            false,
+        )
+        val visited = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        // Semáforo: máximo 8 peticiones HTTP concurrentes por asignatura
+        val semaphore = kotlinx.coroutines.sync.Semaphore(8)
+
+        // BFS paralelo: procesa hasta que la cola esté vacía
+        coroutineScope {
+            while (true) {
+                // Drena la cola actual (puede crecer mientras se procesa)
+                val batch = mutableListOf<Pending>()
+                while (true) { batch += queue.pollFirst() ?: break }
+                if (batch.isEmpty()) break
+
+                val jobs = batch.map { request ->
+                    async(Dispatchers.IO) {
+                        val items = semaphore.withPermit {
+                            try {
+                                paged(request.url)
+                            } catch (error: IllegalStateException) {
+                                if (request.isChildrenRequest && (
+                                        error.message.orEmpty().contains("HTTP 400") ||
+                                            error.message.orEmpty().contains("HTTP 404")
+                                    )
+                                ) {
+                                    return@async
+                                }
+                                throw error
                             }
-                            val size = sequenceOf("size", "fileSize", "sizeBytes", "contentLength")
-                                .mapNotNull { key -> attachment.optLong(key, -1).takeIf { it >= 0 } }
-                                .firstOrNull()
-                            result += EvDocument(
-                                "ev:${course.id}:$contentId:$attachmentId",
-                                course.name,
-                                request.parents,
-                                name,
-                                attachment.optString("modified").ifBlank { item.optString("modified") }.ifBlank { null },
-                                size,
-                                availableFrom,
-                            )
                         }
-                    } catch (error: IllegalStateException) {
-                        val message = error.message.orEmpty()
-                        // Blackboard uses either 400 or 404 when a regular content item has no
-                        // attachment endpoint; it is not a failure of the complete course scan.
-                        if (!message.contains("HTTP 400") && !message.contains("HTTP 404")) {
-                            throw error
+                        for (item in items) {
+                            val contentId = item.optString("id")
+                            if (contentId.isBlank() || !visited.add(contentId)) continue
+                            val title = item.optString("title", "Contenido")
+                            val handler = item.optJSONObject("contentHandler")?.optString("id").orEmpty()
+                            val isFolder = handler in folders || handler.contains("folder") || handler.contains("lesson")
+                            val encodedContent = URLEncoder.encode(contentId, StandardCharsets.UTF_8.name())
+                            val itemModified = item.optString("modified").ifBlank { null }
+
+                            if (hasChildren(item) && handler != "resource/x-bb-document") {
+                                val childrenUrl = "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents/$encodedContent/children".toHttpUrl()
+
+                                // --- Caché diferencial conservadora ---
+                                val cached = cacheMap[contentId]
+                                val canSkip = cached != null &&
+                                    itemModified != null &&
+                                    cached.modified == itemModified &&
+                                    cached.childrenFetched &&
+                                    contentId in knownContentIds
+
+                                if (!canSkip) {
+                                    queue += Pending(childrenUrl, request.parents + title, true)
+                                }
+                                // Actualizar caché si hay modified
+                                if (itemModified != null) {
+                                    cacheUpdates += es.us.ussync.data.ContentCacheEntity(
+                                        contentId = contentId,
+                                        courseId = course.id,
+                                        modified = itemModified,
+                                        childrenFetched = true,
+                                        lastSeenAt = java.time.Instant.now().toString(),
+                                    )
+                                }
+                            }
+                            val available = item.optJSONObject("availability")?.optString("available")
+                            var availableFrom = extractAvailableFrom(item)
+                            if (availableFrom == null && (available == "PartiallyVisible" || item.optString("visibility") == "PARTIALLY_VISIBLE")) {
+                                availableFrom = runCatching {
+                                    val detailUrl = "$EV_ORIGIN/learn/api/v1/courses/$courseId/contents/$encodedContent".toHttpUrl()
+                                    val detail = JSONObject(page(detailUrl))
+                                    extractAvailableFrom(detail)
+                                }.getOrNull()
+                            }
+                            val bodyHtml = item.optString("body")
+                            if (bodyHtml.isNotBlank() && bodyHtml.contains("bbcswebdav")) {
+                                result.addAll(extractEmbeddedDocuments(
+                                    course = course,
+                                    contentId = contentId,
+                                    parents = resolveItemParents(request.parents, title),
+                                    revision = item.optString("modified").ifBlank { null },
+                                    availableFrom = availableFrom,
+                                    bodyHtml = bodyHtml,
+                                ))
+                            }
+                            if (isFolder || handler.contains("externallink") || handler.contains("blti") || handler == "resource/x-bb-document") continue
+                            val attachmentUrl = "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents/$encodedContent/attachments".toHttpUrl()
+                            try {
+                                for (attachment in semaphore.withPermit { paged(attachmentUrl) }) {
+                                    val attachmentId = attachment.optString("id")
+                                    if (attachmentId.isBlank()) continue
+                                    val name = attachment.optString("fileName").ifBlank {
+                                        attachment.optString("name", attachmentId)
+                                    }
+                                    val size = sequenceOf("size", "fileSize", "sizeBytes", "contentLength")
+                                        .mapNotNull { key -> attachment.optLong(key, -1).takeIf { it >= 0 } }
+                                        .firstOrNull()
+                                    result += EvDocument(
+                                        "ev:${course.id}:$contentId:$attachmentId",
+                                        course.name,
+                                        resolveItemParents(request.parents, title),
+                                        name,
+                                        attachment.optString("modified").ifBlank { item.optString("modified") }.ifBlank { null },
+                                        size,
+                                        availableFrom,
+                                    )
+                                }
+                            } catch (error: IllegalStateException) {
+                                val message = error.message.orEmpty()
+                                if (!message.contains("HTTP 400") && !message.contains("HTTP 404")) throw error
+                            }
                         }
                     }
                 }
+                jobs.awaitAll()
             }
         }
-        return result
+
+        // Persiste actualizaciones de caché en batch
+        if (dao != null && cacheUpdates.isNotEmpty()) {
+            dao.upsertContentCache(cacheUpdates.toList())
+        }
+
+        return result.toList()
     }
 
     fun download(user: EvUser, document: EvDocument, target: File, progress: (Long, Long) -> Unit = { _, _ -> }) {
@@ -302,8 +509,14 @@ internal class BlackboardClient(
         require(parts.size == 4 && parts.first() == "ev")
         val course = URLEncoder.encode(parts[1], StandardCharsets.UTF_8.name())
         val content = URLEncoder.encode(parts[2], StandardCharsets.UTF_8.name())
-        val attachment = URLEncoder.encode(parts[3], StandardCharsets.UTF_8.name())
-        val url = "$EV_ORIGIN${user.apiPrefix}/courses/$course/contents/$content/attachments/$attachment/download".toHttpUrl()
+        val isWebdav = parts[3].startsWith("webdav_")
+        val url = if (isWebdav) {
+            val path = URLDecoder.decode(parts[3].removePrefix("webdav_"), StandardCharsets.UTF_8.name())
+            "$EV_ORIGIN$path".toHttpUrl()
+        } else {
+            val attachment = URLEncoder.encode(parts[3], StandardCharsets.UTF_8.name())
+            "$EV_ORIGIN${user.apiPrefix}/courses/$course/contents/$content/attachments/$attachment/download".toHttpUrl()
+        }
         repeat(4) { attempt ->
             client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
                 if (response.code in listOf(429, 500, 502, 503, 504) && attempt < 3) {
@@ -702,14 +915,50 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
         loading = { current -> current.copy(loading = true, error = null) },
         operation = { current ->
             val stored = catalog.evCourses().associateBy { it.remoteId }
+            val libraryTree = catalog.setting("library_tree_uri")
+            val rootDirs = if (!libraryTree.isNullOrBlank()) {
+                runCatching {
+                    androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), android.net.Uri.parse(libraryTree))
+                        ?.listFiles()?.filter { it.isDirectory && !it.name.orEmpty().startsWith(".") }
+                }.getOrNull().orEmpty()
+            } else emptyList()
+
             val courses = blackboardClient.courses(current.user).map { course ->
-                course.copy(folder = stored[course.id]?.folder)
+                val existingFolder = stored[course.id]?.folder
+                val discoveredFolder = if (existingFolder == null && rootDirs.isNotEmpty()) {
+                    val initials = subjectInitials(course.name)
+                    rootDirs.firstOrNull { dir ->
+                        val dirName = dir.name ?: return@firstOrNull false
+                        dirName.uppercase() in initials ||
+                        normalizeForMatching(dirName).uppercase() in initials ||
+                        dirName.equals(course.name, ignoreCase = true) ||
+                        dirName.equals(cleanCourseName(course.name), ignoreCase = true)
+                    }?.name
+                } else null
+                course.copy(folder = existingFolder ?: discoveredFolder)
             }
             catalog.upsertCourses(courses.map { course ->
                 CourseEntity("ev:${course.id}", "EV", course.id, course.name, course.folder,
                     course.id in current.selectedCourseIds || stored[course.id]?.selected == true,
                     Instant.now().toString())
             })
+            if (!libraryTree.isNullOrBlank()) {
+                val cachedDocs = catalog.allAvailableDocuments().map { entity ->
+                    EvDocument(
+                        key = entity.key,
+                        courseName = entity.courseName,
+                        path = entity.relativePath.split("/").filter { it.isNotBlank() },
+                        filename = entity.filename,
+                        revision = entity.revision,
+                        size = entity.size,
+                        availableFrom = entity.availableFrom,
+                    )
+                }
+                if (cachedDocs.isNotEmpty()) {
+                    val folders = courses.mapNotNull { c -> c.folder?.let { c.id to it } }.toMap()
+                    catalog.reconcileExistingLibraryFiles(getApplication(), libraryTree, cachedDocs, folders)
+                }
+            }
             current.copy(
                 courses = courses,
                 selectedCourseIds = courses.filter { it.id in current.selectedCourseIds || stored[it.id]?.selected == true }.map { it.id }.toSet(),
@@ -747,15 +996,30 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
         operation = { current ->
             val selected = current.courses.filter { it.id in current.selectedCourseIds }
             es.us.ussync.sync.SyncLocks.scan.withLock {
-            val documents = blackboardClient.documents(current.user, selected)
-            val missingDownloads = catalog.reconcileMissingDownloads(getApplication<Application>())
+            val documents = blackboardClient.documents(current.user, selected, catalog)
             val libraryTree = catalog.setting("library_tree_uri")
             val courseFolders = selected.mapNotNull { c -> c.folder?.let { c.id to it } }.toMap()
-            val existingFiles = catalog.reconcileExistingLibraryFiles(getApplication<Application>(), libraryTree, documents, courseFolders)
+            val newlyDiscoveredFolders = mutableMapOf<String, String>()
+            val existingFiles = catalog.reconcileExistingLibraryFiles(
+                getApplication<Application>(),
+                libraryTree,
+                documents,
+                courseFolders,
+            ) { courseId, folderName ->
+                newlyDiscoveredFolders[courseId] = folderName
+            }
+            val missingDownloads = catalog.reconcileMissingDownloads(getApplication<Application>(), libraryTree)
             val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
             val changes = catalog.recordEvScan(documents, selected.map { it.id }, missingDownloads, blocked, existingFiles)
             catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
+            val updatedCourses = if (newlyDiscoveredFolders.isNotEmpty()) {
+                current.courses.map { c ->
+                    val found = newlyDiscoveredFolders[c.id]
+                    if (found != null && c.folder == null) c.copy(folder = found) else c
+                }
+            } else current.courses
             current.copy(
+                courses = updatedCourses,
                 documents = documents,
                 changes = changes,
                 loading = false,

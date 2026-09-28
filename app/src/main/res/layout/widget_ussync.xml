@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:gravity="center">
+
+    <!-- Título -->
+    <TextView
+        android:id="@+id/widget_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="USSync"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:textColor="#FFFFFFFF" />
+
+    <!-- Estado de la sesión EV -->
+    <TextView
+        android:id="@+id/widget_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Comprobando…"
+        android:textSize="11sp"
+        android:textColor="#CCFFFFFF" />
+
+    <!-- Pendientes (solo visible cuando conectado) -->
+    <TextView
+        android:id="@+id/widget_pending"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text=""
+        android:textSize="11sp"
+        android:textColor="#CCFFFFFF" />
+
+    <!-- Última sincronización -->
+    <TextView
+        android:id="@+id/widget_last_sync"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:text=""
+        android:textSize="10sp"
+        android:textColor="#99FFFFFF" />
+
+    <!-- Botón conectar (visible solo si desconectado) -->
+    <Button
+        android:id="@+id/widget_connect_btn"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:layout_marginTop="8dp"
+        android:text="Conectar"
+        android:textSize="11sp"
+        android:visibility="gone" />
+
+</LinearLayout>

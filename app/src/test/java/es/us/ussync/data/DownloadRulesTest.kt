@@ -44,4 +44,28 @@ class DownloadRulesTest {
         assertEquals("1050012algebrai", normalizeForMatching("1050012 - Álgebra I"))
         assertEquals("tema1ejercicios2024pdf", normalizeForMatching("Tema 1: Ejercicios [2024].pdf"))
     }
+
+    @Test fun cleanCourseNameStripsYearsTransversalAndCodes() {
+        assertEquals(
+            "Inferencia Estadística",
+            cleanCourseName("202627-Inferencia Estadística-TRANSVERSAL (Grupos 986392, 986393, 986394)"),
+        )
+        assertEquals(
+            "Geometría Local de Curvas y Superficies",
+            cleanCourseName("202627-Geometría Local de Curvas y Superficies-TRANSVERSAL (Grupos 944785, 944786, 986378)"),
+        )
+        assertEquals(
+            "Ampliación de Ecuaciones Diferenciales",
+            cleanCourseName("202627-Ampliación de Ecuaciones Diferenciales-TRANSVERSAL (Grupos 1043265, 1043266, 1043267)"),
+        )
+    }
+
+    @Test fun subjectInitialsGeneratesExpectedAcronyms() {
+        assertTrue("IE" in subjectInitials("202627-Inferencia Estadística-TRANSVERSAL (Grupos 986392, 986393, 986394)"))
+        assertTrue("GL" in subjectInitials("202627-Geometría Local de Curvas y Superficies-TRANSVERSAL (Grupos 944785, 944786, 986378)"))
+        assertTrue("AED" in subjectInitials("202627-Ampliación de Ecuaciones Diferenciales-TRANSVERSAL (Grupos 1043265, 1043266, 1043267)"))
+        assertTrue("FVC" in subjectInitials("202627-Funciones de Una Variable Compleja-TRANSVERSAL (Grupos 954107)"))
+        assertTrue("PD" in subjectInitials("202627-Programación Declarativa-TRANSVERSAL (Grupos 1010552, 1025905, 1043415, 961298)"))
+        assertTrue("TAI" in subjectInitials("202627-Tecnologías Avanzadas de la Información-TRANSVERSAL (Grupos 961310)"))
+    }
 }

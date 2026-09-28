@@ -131,11 +131,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             val client = BlackboardClient()
             val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
             if (!forceDownload) SyncLocks.scan.withLock {
-                val documents = client.documents(user, courses.map { EvCourse(it.remoteId, it.name, it.remoteId, it.folder) })
-                val missingDownloads = catalog.reconcileMissingDownloads(applicationContext)
+                val documents = client.documents(user, courses.map { EvCourse(it.remoteId, it.name, it.remoteId, it.folder) }, catalog)
                 val libraryTree = catalog.setting("library_tree_uri")
                 val courseFolders = courses.mapNotNull { c -> c.folder?.let { c.remoteId to it } }.toMap()
                 val existingFiles = catalog.reconcileExistingLibraryFiles(applicationContext, libraryTree, documents, courseFolders)
+                val missingDownloads = catalog.reconcileMissingDownloads(applicationContext, libraryTree)
                 catalog.recordEvScan(documents, courses.map { it.remoteId }, missingDownloads, blocked, existingFiles)
                 catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
             }
@@ -175,9 +175,20 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             if (!forceDownload) catalog.seviusSelections().filter { it.courseId in courseIds }.forEach { selection ->
                 es.us.ussync.sevius.downloadTeachingSelection(applicationContext, selection)
             }
+            // Comprobar calificaciones nuevas en el gradebook de EV
+            if (!forceDownload) {
+                es.us.ussync.blackboard.GradeChecker.checkGrades(
+                    context = applicationContext,
+                    user = user,
+                    courseIds = courseIds.toList(),
+                    dao = catalog,
+                )
+            }
             catalog.putSetting(AppSettingsEntity("background_status", "Consulta completada"))
             val remaining = catalog.pendingDocuments().filter { it.documentKey.split(":").getOrNull(1) in courseIds }
             if (catalog.setting("notifications") == "true" && remaining.isNotEmpty()) notifyPending(remaining.size)
+            // Refresca el widget con los datos más recientes
+            es.us.ussync.widget.UsSyncWidget.updateAll(applicationContext)
             Result.success()
         } catch (error: Exception) {
             if (error is CancellationException) throw error

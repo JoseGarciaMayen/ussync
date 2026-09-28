@@ -105,6 +105,38 @@ data class SeviusSelectionEntity(
 @Entity(tableName = "app_settings")
 data class AppSettingsEntity(@PrimaryKey val key: String, val value: String)
 
+/**
+ * Caché del árbol de contenidos de Blackboard.
+ * Se usa para el escaneo diferencial: si [modified] no ha cambiado desde la última
+ * visita Y ya hay documentos registrados para ese contentId, se puede saltar la petición
+ * de hijos. La caché es conservadora: si [modified] está vacío se ignora.
+ */
+@Entity(tableName = "content_cache")
+data class ContentCacheEntity(
+    @PrimaryKey val contentId: String,
+    val courseId: String,
+    val modified: String,
+    val childrenFetched: Boolean,
+    val lastSeenAt: String,
+)
+
+/**
+ * Última nota conocida para cada columna del gradebook de EV.
+ * Cuando [score] o [modified] cambia respecto al snapshot anterior, se emite
+ * una notificación de calificación.
+ */
+@Entity(tableName = "grade_snapshots", primaryKeys = ["courseId", "columnId"])
+data class GradeSnapshotEntity(
+    val courseId: String,
+    val columnId: String,
+    val columnName: String,
+    val score: String?,          // null = sin calificar
+    val possible: String?,       // nota máxima posible
+    val modified: String?,       // ISO-8601 del último cambio en el servidor
+    val seenAt: String,
+)
+
+
 @Entity(tableName = "scans")
 data class ScanEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -279,6 +311,32 @@ interface CatalogDao {
     @Query("SELECT * FROM courses WHERE source = 'EV'")
     suspend fun evCourses(): List<CourseEntity>
 
+    @Query("UPDATE courses SET folder = :folder WHERE remoteId = :remoteId")
+    suspend fun updateCourseFolder(remoteId: String, folder: String)
+
+    @Query("SELECT * FROM remote_documents WHERE remoteAvailable = 1")
+    suspend fun allAvailableDocuments(): List<RemoteDocumentEntity>
+
+    // --- Caché diferencial de árbol ---
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertContentCache(entries: List<ContentCacheEntity>)
+
+    @Query("SELECT * FROM content_cache WHERE courseId = :courseId")
+    suspend fun contentCacheForCourse(courseId: String): List<ContentCacheEntity>
+
+    @Query("DELETE FROM content_cache WHERE courseId = :courseId")
+    suspend fun clearContentCache(courseId: String)
+
+    // --- Calificaciones ---
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertGradeSnapshots(snapshots: List<GradeSnapshotEntity>)
+
+    @Query("SELECT * FROM grade_snapshots WHERE courseId = :courseId")
+    suspend fun gradeSnapshotsForCourse(courseId: String): List<GradeSnapshotEntity>
+
+    @Query("SELECT * FROM grade_snapshots")
+    suspend fun allGradeSnapshots(): List<GradeSnapshotEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCourses(courses: List<CourseEntity>)
 
@@ -388,8 +446,10 @@ data class ChangeSummary(val new: Int, val updated: Int, val unchanged: Int, val
         DownloadRecordEntity::class,
         SeviusSelectionEntity::class,
         AppSettingsEntity::class,
+        ContentCacheEntity::class,
+        GradeSnapshotEntity::class,
     ],
-    version = 3,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -414,9 +474,39 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val migration3To4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `content_cache` (" +
+                        "`contentId` TEXT NOT NULL, " +
+                        "`courseId` TEXT NOT NULL, " +
+                        "`modified` TEXT NOT NULL, " +
+                        "`childrenFetched` INTEGER NOT NULL, " +
+                        "`lastSeenAt` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`contentId`))"
+                )
+            }
+        }
+
+        private val migration4To5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `grade_snapshots` (" +
+                        "`courseId` TEXT NOT NULL, " +
+                        "`columnId` TEXT NOT NULL, " +
+                        "`columnName` TEXT NOT NULL, " +
+                        "`score` TEXT, " +
+                        "`possible` TEXT, " +
+                        "`modified` TEXT, " +
+                        "`seenAt` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`courseId`, `columnId`))"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, AppDatabase::class.java, "ussync.db")
-                .addMigrations(migration1To2, migration2To3)
+                .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5)
                 .build()
                 .also { instance = it }
         }
