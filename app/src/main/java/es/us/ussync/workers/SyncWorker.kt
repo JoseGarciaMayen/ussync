@@ -115,7 +115,10 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             withContext(Dispatchers.Main) { CookieManager.getInstance().setAcceptCookie(true) }
             val profile = EvProfileClient().verify()
             val user = when (profile) {
-                is ProfileResult.Valid -> profile.user
+                is ProfileResult.Valid -> {
+                    catalog.putSetting(AppSettingsEntity("ev_session_state", "CONNECTED"))
+                    profile.user
+                }
                 ProfileResult.Expired -> {
                     sessionExpired(catalog)
                     return@withContext Result.success()
@@ -204,7 +207,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     }
 
     private suspend fun sessionExpired(catalog: CatalogDao) {
+        catalog.putSetting(AppSettingsEntity("ev_session_state", "EXPIRED"))
         catalog.putSetting(AppSettingsEntity("background_status", "La sesión ha caducado. Conecta de nuevo Enseñanza Virtual para continuar las consultas."))
+        es.us.ussync.widget.UsSyncWidget.updateAll(applicationContext)
         if (catalog.setting("notify_session") == "false") return
         val context = applicationContext
         if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return

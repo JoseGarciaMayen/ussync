@@ -65,6 +65,11 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent { USSyncApp(intent.getBooleanExtra("review_news", false), intent.getBooleanExtra("reconnect_session", false)) }
     }
+
+    override fun onResume() {
+        super.onResume()
+        es.us.ussync.widget.UsSyncWidget.updateAll(this)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -280,7 +285,7 @@ private fun USSyncApp(reviewNews: Boolean, reconnectSession: Boolean) {
                         onSetIgnored = { key, ignoredValue -> session.setDocumentIgnored(key, ignoredValue) },
                         onMessage = { message(it) },
                     )
-                    3 -> Settings(appearance, authenticated != null, wifiOnly, { session.setWifiOnly(it) }, { session.setAppearance(it) }, { session.showLogin() }, settings,
+                    3 -> Settings(appearance, authenticated != null, wifiOnly, { session.setWifiOnly(it) }, { session.setAppearance(it) }, { session.showLogin() }, { session.disconnect() }, settings,
                         { key, value ->
                             if ((key == "notifications" || key == "notify_session") && value == "true" && android.os.Build.VERSION.SDK_INT >= 33) {
                                 notificationKey = key
@@ -314,14 +319,21 @@ private fun USSyncApp(reviewNews: Boolean, reconnectSession: Boolean) {
         title = { Text("Últimas descargas") },
         text = {
             val last = latestScan
-            val items = last?.let { scan -> recentDownloads.filter { it.createdAt >= scan.startedAt }.take(10) }.orEmpty()
+            val items = last?.let { scan -> recentDownloads.filter { (it.createdAt ?: "") >= scan.startedAt }.take(10) }.orEmpty()
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(last?.finishedAt?.let { "Última consulta · ${es.us.ussync.ui.localDateTime(it)}" } ?: "Todavía no se ha hecho ninguna consulta", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (items.isEmpty()) Text(if (last == null) "Sin consultas todavía." else "No se descargó ningún documento en la última consulta.")
                 else items.forEach { download ->
+                    val filename = download.filename?.takeIf { it.isNotBlank() } ?: "Documento descargado"
+                    val subtitle = listOfNotNull(
+                        download.courseName?.takeIf { it.isNotBlank() },
+                        download.relativePath?.takeIf { it.isNotBlank() }
+                    ).joinToString(" · ")
                     Column {
-                        Text(download.filename, style = MaterialTheme.typography.titleMedium)
-                        Text("${download.courseName} · ${download.relativePath}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(filename, style = MaterialTheme.typography.titleMedium)
+                        if (subtitle.isNotBlank()) {
+                            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
             }
@@ -763,6 +775,7 @@ private fun Settings(
     wifi: (Boolean) -> Unit,
     theme: (String) -> Unit,
     login: () -> Unit,
+    disconnect: () -> Unit,
     settings: Map<String, String>,
     setting: (String, String) -> Unit,
     testNotifications: () -> Unit,
@@ -896,6 +909,9 @@ private fun Settings(
             Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.secondaryContainer) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) { Text("Enseñanza Virtual US", style = MaterialTheme.typography.labelLarge); Text(if (connected) "Sesión activa y conectada" else "Sesión no conectada", style = MaterialTheme.typography.labelMedium, color = if (connected) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                    if (connected) {
+                        OutlinedButton(onClick = disconnect, shape = RoundedCornerShape(10.dp), modifier = Modifier.padding(end = 8.dp)) { Text("Desconectar") }
+                    }
                     FilledTonalButton(onClick = login, shape = RoundedCornerShape(10.dp)) { Text(if (connected) "Reconectar" else "Conectar") }
                 }
                 Text("Si caduca la sesión recibirás un aviso para volver a conectarla de forma segura.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)

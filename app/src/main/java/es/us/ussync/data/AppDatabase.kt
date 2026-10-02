@@ -77,17 +77,17 @@ data class DownloadRecordEntity(
 
 data class AutomaticDownload(
     val id: Long,
-    val filename: String,
-    val courseName: String,
-    val createdAt: String,
+    val filename: String? = null,
+    val courseName: String? = null,
+    val createdAt: String? = null,
 )
 
 data class RecentDownload(
     val id: Long,
-    val filename: String,
-    val courseName: String,
-    val relativePath: String,
-    val createdAt: String,
+    val filename: String? = null,
+    val courseName: String? = null,
+    val relativePath: String? = null,
+    val createdAt: String? = null,
 )
 
 @Entity(tableName = "sevius_selections")
@@ -233,7 +233,11 @@ interface CatalogDao {
     fun observeEvCourses(): Flow<List<CourseEntity>>
 
     @Query("""
-        SELECT r.id, d.filename, COALESCE(c.folder, d.courseName) AS courseName, d.relativePath, r.createdAt
+        SELECT r.id,
+               COALESCE(d.filename, NULLIF(r.documentKey, ''), 'Documento descargado') AS filename,
+               COALESCE(c.folder, d.courseName, '') AS courseName,
+               COALESCE(d.relativePath, '') AS relativePath,
+               r.createdAt
         FROM download_records r
         LEFT JOIN remote_documents d ON d.`key` = r.documentKey
         LEFT JOIN courses c ON c.remoteId = d.courseId
@@ -247,8 +251,10 @@ interface CatalogDao {
     fun observeLatestScan(): Flow<ScanEntity?>
 
     @Query("""
-        SELECT r.id, COALESCE(d.filename, r.documentKey) AS filename,
-               COALESCE(d.courseName, 'Documento guardado') AS courseName, r.createdAt
+        SELECT r.id,
+               COALESCE(d.filename, NULLIF(r.documentKey, ''), 'Documento guardado') AS filename,
+               COALESCE(d.courseName, 'Documento guardado') AS courseName,
+               r.createdAt
         FROM download_records r
         LEFT JOIN remote_documents d ON d.`key` = r.documentKey
         WHERE r.result = 'AUTO_DOWNLOADED'

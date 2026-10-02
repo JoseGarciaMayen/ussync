@@ -68,4 +68,17 @@ class DownloadRulesTest {
         assertTrue("PD" in subjectInitials("202627-Programación Declarativa-TRANSVERSAL (Grupos 1010552, 1025905, 1043415, 961298)"))
         assertTrue("TAI" in subjectInitials("202627-Tecnologías Avanzadas de la Información-TRANSVERSAL (Grupos 961310)"))
     }
+
+    @Test fun recentAndAutomaticDownloadsAllowNullFieldsWithoutNpe() {
+        val recent = RecentDownload(id = 1L, filename = null, courseName = null, relativePath = null, createdAt = null)
+        assertNull(recent.filename)
+        assertNull(recent.courseName)
+        assertNull(recent.relativePath)
+        assertNull(recent.createdAt)
+
+        val auto = AutomaticDownload(id = 2L, filename = null, courseName = null, createdAt = null)
+        assertNull(auto.filename)
+        assertNull(auto.courseName)
+        assertNull(auto.createdAt)
+    }
 }

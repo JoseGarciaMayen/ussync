@@ -658,6 +658,7 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
     }
     fun restoreInbox(item: InboxDocument) = viewModelScope.launch {
         catalog.updateInboxState(item.inboxId, item.state)
+        es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
     }
 
     /**
@@ -788,11 +789,21 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
         catch (_: Exception) { ProfileResult.Failed("No se pudo comprobar la sesión guardada.") }
         when (result) {
             is ProfileResult.Valid -> {
+                catalog.putSetting(AppSettingsEntity("ev_session_state", "CONNECTED"))
+                catalog.putSetting(AppSettingsEntity("background_status", "Sesión conectada. Las consultas pueden continuar."))
                 mutableState.value = EvSessionState.Authenticated(result.user)
                 loadCourses()
             }
-            else -> mutableState.value = EvSessionState.Welcome
+            ProfileResult.Expired -> {
+                catalog.putSetting(AppSettingsEntity("ev_session_state", "EXPIRED"))
+                catalog.putSetting(AppSettingsEntity("background_status", "La sesión ha caducado."))
+                mutableState.value = EvSessionState.Welcome
+            }
+            is ProfileResult.Failed -> {
+                mutableState.value = EvSessionState.Welcome
+            }
         }
+        es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
     }
 
     fun showLogin() {
@@ -816,10 +827,12 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun ignoreInbox(item: InboxDocument) = viewModelScope.launch {
         catalog.updateInboxState(item.inboxId, "IGNORED", Instant.now().toString())
+        es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
     }
 
     fun laterInbox(item: InboxDocument) = viewModelScope.launch {
         catalog.updateInboxState(item.inboxId, "LATER")
+        es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
     }
 
     fun downloadInbox(item: InboxDocument) = viewModelScope.launch {
@@ -871,6 +884,7 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
             ))
             catalog.markDownloaded(remote.key, published.sha256, remote.revision)
             catalog.updateInboxState(item.inboxId, "DOWNLOADED", Instant.now().toString())
+            es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
         } catch (error: Exception) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             downloadErrors.value = downloadErrors.value + (item.inboxId to (error.message ?: "No se pudo descargar. Vuelve a intentarlo."))
@@ -882,6 +896,20 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun showWelcome() {
         mutableState.value = EvSessionState.Welcome
+    }
+
+    fun disconnect() = viewModelScope.launch {
+        withContext(Dispatchers.Main) {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.removeAllCookies(null)
+            cookieManager.flush()
+        }
+        catalog.putSetting(AppSettingsEntity("ev_session_state", "DISCONNECTED"))
+        catalog.putSetting(AppSettingsEntity("background_status", "Sesión desconectada."))
+        getApplication<Application>().getSystemService(android.app.NotificationManager::class.java)
+            .cancel(es.us.ussync.workers.SyncWorker.SESSION_NOTIFICATION_ID)
+        mutableState.value = EvSessionState.Welcome
+        es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
     }
 
     fun verifySession(silent: Boolean = false) {
@@ -899,13 +927,20 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
                 is ProfileResult.Valid -> {
                     getApplication<Application>().getSystemService(android.app.NotificationManager::class.java)
                         .cancel(es.us.ussync.workers.SyncWorker.SESSION_NOTIFICATION_ID)
+                    catalog.putSetting(AppSettingsEntity("ev_session_state", "CONNECTED"))
                     catalog.putSetting(AppSettingsEntity("background_status", "Sesión conectada. Las consultas pueden continuar."))
                     mutableState.value = EvSessionState.Authenticated(result.user)
                     loadCourses()
+                    es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
                 }
-                ProfileResult.Expired -> if (!silent) mutableState.value = EvSessionState.Failed(
-                    "La sesión no es válida o ha caducado. Completa el acceso de nuevo.",
-                )
+                ProfileResult.Expired -> {
+                    catalog.putSetting(AppSettingsEntity("ev_session_state", "EXPIRED"))
+                    catalog.putSetting(AppSettingsEntity("background_status", "La sesión ha caducado."))
+                    if (!silent) mutableState.value = EvSessionState.Failed(
+                        "La sesión no es válida o ha caducado. Completa el acceso de nuevo.",
+                    )
+                    es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
+                }
                 is ProfileResult.Failed -> if (!silent) mutableState.value = EvSessionState.Failed(result.message)
             }
         }
@@ -976,6 +1011,7 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
         if (course != null) viewModelScope.launch(Dispatchers.IO) {
             catalog.upsertCourses(listOf(CourseEntity("ev:${course.id}", "EV", course.id, course.name, course.folder,
                 courseId in selection, Instant.now().toString())))
+            es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
         }
     }
 
@@ -1012,6 +1048,7 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
             val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
             val changes = catalog.recordEvScan(documents, selected.map { it.id }, missingDownloads, blocked, existingFiles)
             catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
+            es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
             val updatedCourses = if (newlyDiscoveredFolders.isNotEmpty()) {
                 current.courses.map { c ->
                     val found = newlyDiscoveredFolders[c.id]
@@ -1057,7 +1094,14 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
                 if (!applyRules) return@launch
                 applyRulesToPending(current.selectedCourseIds)
             } catch (error: Exception) {
-                mutableState.value = current.copy(loading = false, error = error.message ?: "Error al consultar EV.")
+                if (error is EvSessionExpiredException) {
+                    catalog.putSetting(AppSettingsEntity("ev_session_state", "EXPIRED"))
+                    catalog.putSetting(AppSettingsEntity("background_status", "La sesión ha caducado."))
+                    mutableState.value = EvSessionState.Welcome
+                    es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
+                } else {
+                    mutableState.value = current.copy(loading = false, error = error.message ?: "Error al consultar EV.")
+                }
             }
         }
     }
