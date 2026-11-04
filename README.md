@@ -77,6 +77,12 @@ El proyecto es una aplicación nativa para Android desarrollada en Kotlin y Jetp
   ```bash
   ./gradlew assembleRelease
   ```
+  La firma de release requiere las variables `USSYNC_RELEASE_STORE_FILE`,
+  `USSYNC_RELEASE_STORE_PASSWORD`, `USSYNC_RELEASE_KEY_ALIAS` y
+  `USSYNC_RELEASE_KEY_PASSWORD`. La clave no se guarda en el repositorio.
+  El workflow de GitHub Actions también requiere los secretos
+  `USSYNC_RELEASE_KEYSTORE_BASE64`, `USSYNC_RELEASE_STORE_PASSWORD`,
+  `USSYNC_RELEASE_KEY_ALIAS` y `USSYNC_RELEASE_KEY_PASSWORD`.
 - **Instalar en un dispositivo conectado por ADB:**
   ```bash
   ./android-install.sh

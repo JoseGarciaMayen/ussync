@@ -5,6 +5,26 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val releaseStoreFile = System.getenv("USSYNC_RELEASE_STORE_FILE")
+val releaseStorePassword = System.getenv("USSYNC_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("USSYNC_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("USSYNC_RELEASE_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
+if (
+    gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+    && !releaseSigningConfigured
+) {
+    throw org.gradle.api.GradleException(
+        "Release signing is not configured. Set the USSYNC_RELEASE_* environment variables."
+    )
+}
+
 android {
     namespace = "es.us.ussync"
     compileSdk = 35
@@ -18,23 +38,24 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = file("release.keystore")
-            storePassword = "ussync2026"
-            keyAlias = "ussync"
-            keyPassword = "ussync2026"
+    if (releaseSigningConfigured) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-        }
-        debug {
-            signingConfig = signingConfigs.getByName("release")
         }
     }
 

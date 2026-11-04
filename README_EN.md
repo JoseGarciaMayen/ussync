@@ -77,6 +77,12 @@ USSync is a modern native Android application built with Kotlin and Jetpack Comp
   ```bash
   ./gradlew assembleRelease
   ```
+  Release signing requires `USSYNC_RELEASE_STORE_FILE`,
+  `USSYNC_RELEASE_STORE_PASSWORD`, `USSYNC_RELEASE_KEY_ALIAS`, and
+  `USSYNC_RELEASE_KEY_PASSWORD`. The signing key is not stored in the repository.
+  The GitHub Actions workflow also requires the secrets
+  `USSYNC_RELEASE_KEYSTORE_BASE64`, `USSYNC_RELEASE_STORE_PASSWORD`,
+  `USSYNC_RELEASE_KEY_ALIAS`, and `USSYNC_RELEASE_KEY_PASSWORD`.
 - **Install on ADB-connected device:**
   ```bash
   ./android-install.sh
