@@ -251,14 +251,14 @@ suspend fun CatalogDao.reconcileExistingLibraryFiles(
                 }
             }
 
-            // 4. Same extension & matching normalized base name
+            // 4. Same extension and identical normalized base name. No substring matching:
+            // "Tema 2.pdf" must not claim "Tema 2 - Ampliación.pdf" and hide it as if it
+            // had already been downloaded.
             if (matched == null && extension.isNotBlank() && baseNameNorm.length >= 4) {
                 matched = localFiles.firstOrNull {
                     it.file.uri.toString() !in claimedUris &&
                     it.name.substringAfterLast('.', "").equals(extension, ignoreCase = true) &&
-                    (normalizeForMatching(it.name.substringBeforeLast('.')) == baseNameNorm ||
-                     normalizeForMatching(it.name.substringBeforeLast('.')).contains(baseNameNorm) ||
-                     baseNameNorm.contains(normalizeForMatching(it.name.substringBeforeLast('.'))))
+                    normalizeForMatching(it.name.substringBeforeLast('.')) == baseNameNorm
                 }
             }
 

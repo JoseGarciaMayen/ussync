@@ -134,12 +134,20 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             val client = BlackboardClient()
             val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
             if (!forceDownload) SyncLocks.scan.withLock {
-                val documents = client.documents(user, courses.map { EvCourse(it.remoteId, it.name, it.remoteId, it.folder) }, catalog)
+                val courseIds = courses.map { it.remoteId }
+                val previous = catalog.documentsForCourses(courseIds).associateBy { it.key }
+                val documents = client.documents(
+                    user,
+                    courses.map { EvCourse(it.remoteId, it.name, it.remoteId, it.folder) },
+                    catalog,
+                ) { batch ->
+                    catalog.recordDiscoveredDocuments(batch, previous, blocked)
+                }
                 val libraryTree = catalog.setting("library_tree_uri")
                 val courseFolders = courses.mapNotNull { c -> c.folder?.let { c.remoteId to it } }.toMap()
                 val existingFiles = catalog.reconcileExistingLibraryFiles(applicationContext, libraryTree, documents, courseFolders)
                 val missingDownloads = catalog.reconcileMissingDownloads(applicationContext, libraryTree)
-                catalog.recordEvScan(documents, courses.map { it.remoteId }, missingDownloads, blocked, existingFiles)
+                catalog.recordEvScan(documents, courseIds, missingDownloads, blocked, existingFiles, previous)
                 catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
             }
             val rules = catalog.savedRules()

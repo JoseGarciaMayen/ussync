@@ -342,16 +342,38 @@ internal class BlackboardClient(
             .sortedBy { it.name.lowercase() }
     }
 
-    suspend fun documents(user: EvUser, courses: List<EvCourse>, dao: es.us.ussync.data.CatalogDao? = null): List<EvDocument> = coroutineScope {
+    /**
+     * Recorre el árbol de EV. [onDiscovered] recibe lotes de documentos en cuanto se
+     * encuentran, para poder guardarlos como pendientes sin esperar al final del escaneo.
+     */
+    suspend fun documents(
+        user: EvUser,
+        courses: List<EvCourse>,
+        dao: es.us.ussync.data.CatalogDao? = null,
+        onDiscovered: suspend (List<EvDocument>) -> Unit = {},
+    ): List<EvDocument> = coroutineScope {
         courses.map { course ->
             async(Dispatchers.IO) {
-                scanCourse(user, course, dao)
+                scanCourse(user, course, dao, onDiscovered)
             }
         }.awaitAll().flatten()
     }
 
-    private suspend fun scanCourse(user: EvUser, course: EvCourse, dao: es.us.ussync.data.CatalogDao? = null): List<EvDocument> {
+    private suspend fun scanCourse(
+        user: EvUser,
+        course: EvCourse,
+        dao: es.us.ussync.data.CatalogDao? = null,
+        onDiscovered: suspend (List<EvDocument>) -> Unit = {},
+    ): List<EvDocument> {
         val result = java.util.concurrent.ConcurrentLinkedDeque<EvDocument>()
+        val discovered = java.util.concurrent.ConcurrentLinkedDeque<EvDocument>()
+
+        suspend fun flushDiscovered() {
+            if (discovered.isEmpty()) return
+            val batch = mutableListOf<EvDocument>()
+            while (true) batch += discovered.pollFirst() ?: break
+            if (batch.isNotEmpty()) onDiscovered(batch)
+        }
         val folders = setOf("resource/x-bb-folder", "resource/x-bb-lesson", "resource/x-bb-module")
         val courseId = URLEncoder.encode(course.id, StandardCharsets.UTF_8.name())
 
@@ -374,6 +396,8 @@ internal class BlackboardClient(
             val url: okhttp3.HttpUrl,
             val parents: List<String>,
             val isChildrenRequest: Boolean,
+            val contentId: String? = null,
+            val modified: String? = null,
         )
         val queue = java.util.concurrent.ConcurrentLinkedDeque<Pending>()
         queue += Pending(
@@ -397,13 +421,40 @@ internal class BlackboardClient(
                     async(Dispatchers.IO) {
                         val items = semaphore.withPermit {
                             try {
-                                paged(request.url)
+                                paged(request.url).also {
+                                    // Solo se marca la carpeta como descendida si sus hijos se
+                                    // han podido leer. Antes se cacheaba incluso cuando la
+                                    // petición fallaba y el siguiente escaneo la saltaba,
+                                    // dejando archivos nuevos sin descubrir.
+                                    val contentId = request.contentId
+                                    val modified = request.modified
+                                    if (request.isChildrenRequest && contentId != null && modified != null) {
+                                        cacheUpdates += es.us.ussync.data.ContentCacheEntity(
+                                            contentId = contentId,
+                                            courseId = course.id,
+                                            modified = modified,
+                                            childrenFetched = true,
+                                            lastSeenAt = java.time.Instant.now().toString(),
+                                        )
+                                    }
+                                }
                             } catch (error: IllegalStateException) {
                                 if (request.isChildrenRequest && (
                                         error.message.orEmpty().contains("HTTP 400") ||
                                             error.message.orEmpty().contains("HTTP 404")
                                     )
                                 ) {
+                                    val contentId = request.contentId
+                                    val modified = request.modified
+                                    if (contentId != null && modified != null) {
+                                        cacheUpdates += es.us.ussync.data.ContentCacheEntity(
+                                            contentId = contentId,
+                                            courseId = course.id,
+                                            modified = modified,
+                                            childrenFetched = false,
+                                            lastSeenAt = java.time.Instant.now().toString(),
+                                        )
+                                    }
                                     return@async
                                 }
                                 throw error
@@ -430,16 +481,12 @@ internal class BlackboardClient(
                                     contentId in knownContentIds
 
                                 if (!canSkip) {
-                                    queue += Pending(childrenUrl, request.parents + title, true)
-                                }
-                                // Actualizar caché si hay modified
-                                if (itemModified != null) {
-                                    cacheUpdates += es.us.ussync.data.ContentCacheEntity(
+                                    queue += Pending(
+                                        url = childrenUrl,
+                                        parents = request.parents + title,
+                                        isChildrenRequest = true,
                                         contentId = contentId,
-                                        courseId = course.id,
                                         modified = itemModified,
-                                        childrenFetched = true,
-                                        lastSeenAt = java.time.Instant.now().toString(),
                                     )
                                 }
                             }
@@ -454,14 +501,16 @@ internal class BlackboardClient(
                             }
                             val bodyHtml = item.optString("body")
                             if (bodyHtml.isNotBlank() && bodyHtml.contains("bbcswebdav")) {
-                                result.addAll(extractEmbeddedDocuments(
+                                val embedded = extractEmbeddedDocuments(
                                     course = course,
                                     contentId = contentId,
                                     parents = resolveItemParents(request.parents, title),
                                     revision = item.optString("modified").ifBlank { null },
                                     availableFrom = availableFrom,
                                     bodyHtml = bodyHtml,
-                                ))
+                                )
+                                result.addAll(embedded)
+                                discovered.addAll(embedded)
                             }
                             if (isFolder || handler.contains("externallink") || handler.contains("blti") || handler == "resource/x-bb-document") continue
                             val attachmentUrl = "$EV_ORIGIN${user.apiPrefix}/courses/$courseId/contents/$encodedContent/attachments".toHttpUrl()
@@ -475,7 +524,7 @@ internal class BlackboardClient(
                                     val size = sequenceOf("size", "fileSize", "sizeBytes", "contentLength")
                                         .mapNotNull { key -> attachment.optLong(key, -1).takeIf { it >= 0 } }
                                         .firstOrNull()
-                                    result += EvDocument(
+                                    val document = EvDocument(
                                         "ev:${course.id}:$contentId:$attachmentId",
                                         course.name,
                                         resolveItemParents(request.parents, title),
@@ -484,6 +533,8 @@ internal class BlackboardClient(
                                         size,
                                         availableFrom,
                                     )
+                                    result += document
+                                    discovered += document
                                 }
                             } catch (error: IllegalStateException) {
                                 val message = error.message.orEmpty()
@@ -493,8 +544,11 @@ internal class BlackboardClient(
                     }
                 }
                 jobs.awaitAll()
+                // Publica lo encontrado en este nivel del árbol antes de seguir bajando.
+                flushDiscovered()
             }
         }
+        flushDiscovered()
 
         // Persiste actualizaciones de caché en batch
         if (dao != null && cacheUpdates.isNotEmpty()) {
@@ -1032,7 +1086,14 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
         operation = { current ->
             val selected = current.courses.filter { it.id in current.selectedCourseIds }
             es.us.ussync.sync.SyncLocks.scan.withLock {
-            val documents = blackboardClient.documents(current.user, selected, catalog)
+            // Foto del catálogo antes de empezar. Sirve para clasificar los documentos
+            // igual aunque los vayamos guardando por el camino.
+            val previous = if (selected.isEmpty()) emptyMap() else
+                catalog.documentsForCourses(selected.map { it.id }).associateBy { it.key }
+            val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
+            val documents = blackboardClient.documents(current.user, selected, catalog) { batch ->
+                catalog.recordDiscoveredDocuments(batch, previous, blocked)
+            }
             val libraryTree = catalog.setting("library_tree_uri")
             val courseFolders = selected.mapNotNull { c -> c.folder?.let { c.id to it } }.toMap()
             val newlyDiscoveredFolders = mutableMapOf<String, String>()
@@ -1045,8 +1106,14 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
                 newlyDiscoveredFolders[courseId] = folderName
             }
             val missingDownloads = catalog.reconcileMissingDownloads(getApplication<Application>(), libraryTree)
-            val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
-            val changes = catalog.recordEvScan(documents, selected.map { it.id }, missingDownloads, blocked, existingFiles)
+            val changes = catalog.recordEvScan(
+                documents,
+                selected.map { it.id },
+                missingDownloads,
+                blocked,
+                existingFiles,
+                previous,
+            )
             catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
             es.us.ussync.widget.UsSyncWidget.updateAll(getApplication())
             val updatedCourses = if (newlyDiscoveredFolders.isNotEmpty()) {

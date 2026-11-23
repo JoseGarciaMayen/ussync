@@ -323,6 +323,9 @@ interface CatalogDao {
     @Query("SELECT * FROM remote_documents WHERE remoteAvailable = 1")
     suspend fun allAvailableDocuments(): List<RemoteDocumentEntity>
 
+    @Query("SELECT * FROM remote_documents WHERE courseId IN (:courseIds)")
+    suspend fun documentsForCourses(courseIds: List<String>): List<RemoteDocumentEntity>
+
     // --- Caché diferencial de árbol ---
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertContentCache(entries: List<ContentCacheEntity>)
@@ -361,6 +364,49 @@ interface CatalogDao {
     @Query("UPDATE inbox_items SET state = :state, resolvedAt = :resolvedAt WHERE documentKey IN (:keys) AND state IN ('PENDING', 'LATER', 'READY')")
     suspend fun resolveInboxByDocumentKeys(keys: Collection<String>, state: String = "DOWNLOADED", resolvedAt: String? = null)
 
+    /**
+     * Persiste documentos ya descubiertos durante un escaneo en curso, para que aparezcan
+     * como pendientes sin esperar a que termine el árbol completo. La clasificación se hace
+     * contra [previousSnapshot], tomada antes de empezar, para que el resultado final no se
+     * vea alterado por estas escrituras intermedias.
+     */
+    @Transaction
+    suspend fun recordDiscoveredDocuments(
+        documents: List<EvDocument>,
+        previousSnapshot: Map<String, RemoteDocumentEntity>,
+        blockedExtensions: Set<String> = emptySet(),
+    ): ChangeSummary {
+        if (documents.isEmpty()) return ChangeSummary(0, 0, 0, 0)
+        val now = Instant.now().toString()
+        val changes = documents.map { document ->
+            document to classifyEvChange(document, previousSnapshot[document.key])
+        }
+        upsertDocuments(documents.map { document ->
+            evDocumentEntity(document, previousSnapshot[document.key], isRecognized = false, now = now)
+        })
+        var newCount = 0
+        var updatedCount = 0
+        var unchangedCount = 0
+        for ((document, kind) in changes) {
+            when (kind) {
+                ChangeKind.NEW -> newCount++
+                ChangeKind.UPDATED -> updatedCount++
+                else -> unchangedCount++
+            }
+            if (kind == ChangeKind.UNCHANGED) continue
+            if (isBlockedExtension(document.filename, blockedExtensions)) continue
+            if (pendingInboxId(document.key, document.revision) == null) {
+                inbox(InboxItemEntity(
+                    documentKey = document.key,
+                    revision = document.revision,
+                    kind = kind.name,
+                    createdAt = now,
+                ))
+            }
+        }
+        return ChangeSummary(new = newCount, updated = updatedCount, unchanged = unchangedCount, removed = 0)
+    }
+
     @Transaction
     suspend fun recordEvScan(
         documents: List<EvDocument>,
@@ -368,43 +414,18 @@ interface CatalogDao {
         forcePendingKeys: Set<String> = emptySet(),
         blockedExtensions: Set<String> = emptySet(),
         alreadyDownloadedKeys: Set<String> = emptySet(),
+        previousSnapshot: Map<String, RemoteDocumentEntity>? = null,
     ): ChangeSummary {
         val now = Instant.now().toString()
         val scanId = startScan(ScanEntity(startedAt = now, source = "EV"))
-        val existing = documents.takeIf { it.isNotEmpty() }?.let { docs ->
+        val existing = previousSnapshot ?: documents.takeIf { it.isNotEmpty() }?.let { docs ->
             this.documents(docs.map { it.key })
         }.orEmpty().associateBy { it.key }
         val changes = documents.map { document ->
-            val before = existing[document.key]
-            val kind = when {
-                document.key in forcePendingKeys -> ChangeKind.NEW
-                document.key in alreadyDownloadedKeys -> ChangeKind.UNCHANGED
-                before == null -> ChangeKind.NEW
-                before.revision != document.revision || before.size != document.size ||
-                    before.filename != document.filename || before.relativePath != document.path.joinToString("/") -> ChangeKind.UPDATED
-                else -> ChangeKind.UNCHANGED
-            }
-            document to kind
+            document to classifyEvChange(document, existing[document.key], forcePendingKeys, alreadyDownloadedKeys)
         }
         upsertDocuments(documents.map { document ->
-            val before = existing[document.key]
-            val isRecognized = document.key in alreadyDownloadedKeys
-            RemoteDocumentEntity(
-                key = document.key,
-                source = "EV",
-                courseId = document.key.split(":").getOrElse(1) { "" },
-                courseName = document.courseName,
-                relativePath = document.path.joinToString("/"),
-                filename = document.filename,
-                revision = document.revision,
-                size = document.size,
-                firstSeen = before?.firstSeen ?: now,
-                lastSeen = now,
-                remoteAvailable = true,
-                lastDownloadedHash = before?.lastDownloadedHash ?: if (isRecognized) "" else null,
-                lastDownloadedRevision = before?.lastDownloadedRevision ?: if (isRecognized) document.revision else null,
-                availableFrom = document.availableFrom ?: before?.availableFrom,
-            )
+            evDocumentEntity(document, existing[document.key], document.key in alreadyDownloadedKeys, now)
         })
         val scannedCourseIds = scannedIds
         val removed = if (scannedCourseIds.isEmpty()) 0 else markMissing("EV", scannedCourseIds, now)
@@ -438,6 +459,42 @@ interface CatalogDao {
     }
 }
 
+internal fun classifyEvChange(
+    document: EvDocument,
+    before: RemoteDocumentEntity?,
+    forcePendingKeys: Set<String> = emptySet(),
+    alreadyDownloadedKeys: Set<String> = emptySet(),
+): ChangeKind = when {
+    document.key in forcePendingKeys -> ChangeKind.NEW
+    document.key in alreadyDownloadedKeys -> ChangeKind.UNCHANGED
+    before == null -> ChangeKind.NEW
+    before.revision != document.revision || before.size != document.size ||
+        before.filename != document.filename || before.relativePath != document.path.joinToString("/") -> ChangeKind.UPDATED
+    else -> ChangeKind.UNCHANGED
+}
+
+internal fun evDocumentEntity(
+    document: EvDocument,
+    before: RemoteDocumentEntity?,
+    isRecognized: Boolean,
+    now: String,
+): RemoteDocumentEntity = RemoteDocumentEntity(
+    key = document.key,
+    source = "EV",
+    courseId = document.key.split(":").getOrElse(1) { "" },
+    courseName = document.courseName,
+    relativePath = document.path.joinToString("/"),
+    filename = document.filename,
+    revision = document.revision,
+    size = document.size,
+    firstSeen = before?.firstSeen ?: now,
+    lastSeen = now,
+    remoteAvailable = true,
+    lastDownloadedHash = before?.lastDownloadedHash ?: if (isRecognized) "" else null,
+    lastDownloadedRevision = before?.lastDownloadedRevision ?: if (isRecognized) document.revision else null,
+    availableFrom = document.availableFrom ?: before?.availableFrom,
+)
+
 enum class ChangeKind { NEW, UPDATED, UNCHANGED, REMOVED }
 data class ChangeSummary(val new: Int, val updated: Int, val unchanged: Int, val removed: Int)
 
@@ -455,7 +512,7 @@ data class ChangeSummary(val new: Int, val updated: Int, val unchanged: Int, val
         ContentCacheEntity::class,
         GradeSnapshotEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -510,9 +567,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val migration5To6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Versiones anteriores marcaban una carpeta como descendida aunque la
+                // petición de hijos hubiese fallado. Vaciar la caché fuerza un recorrido
+                // completo en la primera consulta tras actualizar.
+                database.execSQL("DELETE FROM `content_cache`")
+            }
+        }
+
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, AppDatabase::class.java, "ussync.db")
-                .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5)
+                .addMigrations(migration1To2, migration2To3, migration3To4, migration4To5, migration5To6)
                 .build()
                 .also { instance = it }
         }
