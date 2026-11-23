@@ -18,6 +18,7 @@ import es.us.ussync.data.matches
 import es.us.ussync.data.parseExtensionList
 import es.us.ussync.data.reconcileMissingDownloads
 import es.us.ussync.data.reconcileExistingLibraryFiles
+import es.us.ussync.data.LocalLibraryIndex
 import es.us.ussync.data.cleanCourseName
 import es.us.ussync.data.normalizeForMatching
 import es.us.ussync.data.subjectInitials
@@ -1091,10 +1092,19 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
             val previous = if (selected.isEmpty()) emptyMap() else
                 catalog.documentsForCourses(selected.map { it.id }).associateBy { it.key }
             val blocked = parseExtensionList(catalog.setting("blocked_extensions"))
-            val documents = blackboardClient.documents(current.user, selected, catalog) { batch ->
-                catalog.recordDiscoveredDocuments(batch, previous, blocked)
-            }
             val libraryTree = catalog.setting("library_tree_uri")
+            val localIndex = LocalLibraryIndex(
+                getApplication<Application>(),
+                libraryTree,
+                selected.associate { it.id to it.folder },
+                selected.associate { it.id to it.name },
+            )
+            val earlyRecognized = mutableSetOf<String>()
+            val documents = blackboardClient.documents(current.user, selected, catalog) { batch ->
+                val recognized = batch.filter { localIndex.alreadyExists(it) }.map { it.key }.toSet()
+                earlyRecognized += recognized
+                catalog.recordDiscoveredDocuments(batch, previous, blocked, recognized)
+            }
             val courseFolders = selected.mapNotNull { c -> c.folder?.let { c.id to it } }.toMap()
             val newlyDiscoveredFolders = mutableMapOf<String, String>()
             val existingFiles = catalog.reconcileExistingLibraryFiles(
@@ -1111,7 +1121,7 @@ class EvSessionViewModel(application: Application) : AndroidViewModel(applicatio
                 selected.map { it.id },
                 missingDownloads,
                 blocked,
-                existingFiles,
+                existingFiles + earlyRecognized,
                 previous,
             )
             catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))

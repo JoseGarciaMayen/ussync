@@ -7,6 +7,8 @@ import es.us.ussync.blackboard.EvDocument
 import es.us.ussync.storage.LibraryDownloader
 import java.text.Normalizer
 import java.time.Instant
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Removes year prefixes, transversal groups, codes, and extra tags from subject names.
@@ -114,6 +116,123 @@ private fun scanDirectoryFiles(dir: DocumentFile, currentPath: String = ""): Lis
         }
     }
     return result
+}
+
+/**
+ * Índice en memoria de la biblioteca local, construido antes de empezar un escaneo.
+ * Permite decidir, en cuanto se descubre un documento remoto, si ya existe localmente
+ * para no mostrarlo como pendiente durante el escaneo. La reconciliación completa al
+ * final del escaneo sigue siendo la fuente de verdad para registrar descargas.
+ */
+class LocalLibraryIndex(
+    context: Context,
+    treeUri: String?,
+    private val courseFolders: Map<String, String?>,
+    private val courseNames: Map<String, String>,
+) {
+    private val rootDirs: List<DocumentFile>
+    private val dirFilesMap: Map<String, List<ScannedLocalFile>>
+    private val courseDirs = mutableMapOf<String, DocumentFile?>()
+    private val claimedDirs = mutableSetOf<String>()
+    private val claimedUris = mutableSetOf<String>()
+    private val mutex = Mutex()
+
+    init {
+        val root = treeUri?.takeIf { it.isNotBlank() }?.let { uri ->
+            runCatching { DocumentFile.fromTreeUri(context, Uri.parse(uri)) }.getOrNull()
+        }
+        if (root == null || !root.exists() || !root.canRead()) {
+            rootDirs = emptyList()
+            dirFilesMap = emptyMap()
+        } else {
+            rootDirs = runCatching { root.listFiles() }.getOrNull()
+                ?.filter { it.isDirectory && !it.name.orEmpty().startsWith(".") }
+                .orEmpty()
+            dirFilesMap = rootDirs.associate { it.uri.toString() to scanDirectoryFiles(it) }
+        }
+    }
+
+    suspend fun alreadyExists(document: EvDocument): Boolean = mutex.withLock {
+        val courseId = document.key.split(":").getOrElse(1) { "" }
+        val courseDir = courseDirs.getOrPut(courseId) { findCourseDir(courseId, document) }
+            ?: return@withLock false
+        val localFiles = dirFilesMap[courseDir.uri.toString()].orEmpty()
+        if (localFiles.isEmpty()) return@withLock false
+
+        val expectedRelPath = (document.path + document.filename).joinToString("/")
+        val normFilename = normalizeForMatching(document.filename)
+        val normSafeFilename = normalizeForMatching(LibraryDownloader.safeName(document.filename))
+        val baseNameNorm = normalizeForMatching(document.filename.substringBeforeLast('.'))
+        val extension = document.filename.substringAfterLast('.', "")
+
+        var matched = localFiles.firstOrNull {
+            it.file.uri.toString() !in claimedUris &&
+                it.relativePath.equals(expectedRelPath, ignoreCase = true)
+        }
+        if (matched == null) {
+            matched = localFiles.firstOrNull {
+                it.file.uri.toString() !in claimedUris &&
+                    (it.name.equals(document.filename, ignoreCase = true) ||
+                        it.name.equals(LibraryDownloader.safeName(document.filename), ignoreCase = true))
+            }
+        }
+        if (matched == null) {
+            matched = localFiles.firstOrNull {
+                it.file.uri.toString() !in claimedUris &&
+                    (it.normName == normFilename || it.normName == normSafeFilename)
+            }
+        }
+        if (matched == null && extension.isNotBlank() && baseNameNorm.length >= 4) {
+            matched = localFiles.firstOrNull {
+                it.file.uri.toString() !in claimedUris &&
+                    it.name.substringAfterLast('.', "").equals(extension, ignoreCase = true) &&
+                    normalizeForMatching(it.name.substringBeforeLast('.')) == baseNameNorm
+            }
+        }
+        if (matched != null) claimedUris += matched.file.uri.toString()
+        matched != null
+    }
+
+    private fun findCourseDir(courseId: String, sample: EvDocument): DocumentFile? {
+        val customFolder = courseFolders[courseId]?.trim().orEmpty()
+        val courseName = courseNames[courseId]?.ifBlank { sample.courseName }?.trim().orEmpty()
+        val cleanCourse = cleanCourseName(courseName)
+        val initials = subjectInitials(courseName)
+        val normCustom = if (customFolder.isNotBlank()) normalizeForMatching(customFolder) else ""
+        val normCourse = if (courseName.isNotBlank()) normalizeForMatching(courseName) else ""
+        val normCleanCourse = if (cleanCourse.isNotBlank()) normalizeForMatching(cleanCourse) else ""
+        val safeCustom = if (customFolder.isNotBlank()) LibraryDownloader.safeName(customFolder) else ""
+        val safeCourse = if (courseName.isNotBlank()) LibraryDownloader.safeName(courseName) else ""
+
+        var courseDir = rootDirs.firstOrNull { dir ->
+            val dirName = dir.name ?: return@firstOrNull false
+            if (dir.uri.toString() in claimedDirs) return@firstOrNull false
+            val normDir = normalizeForMatching(dirName)
+            dirName.equals(customFolder, ignoreCase = true) ||
+                dirName.equals(safeCustom, ignoreCase = true) ||
+                dirName.equals(courseName, ignoreCase = true) ||
+                dirName.equals(cleanCourse, ignoreCase = true) ||
+                dirName.equals(safeCourse, ignoreCase = true) ||
+                (normCustom.isNotBlank() && normDir == normCustom) ||
+                (normCleanCourse.isNotBlank() && normDir == normCleanCourse) ||
+                (normCourse.isNotBlank() && normDir == normCourse) ||
+                dirName.uppercase() in initials ||
+                normDir.uppercase() in initials ||
+                (normCustom.isNotBlank() && normCustom.length >= 3 && (normDir.contains(normCustom) || (normDir.length >= 3 && normCustom.contains(normDir)))) ||
+                (normCleanCourse.isNotBlank() && normDir.length >= 4 && (normDir.contains(normCleanCourse) || normCleanCourse.contains(normDir)))
+        }
+        if (courseDir == null) {
+            val normSample = normalizeForMatching(sample.filename)
+            courseDir = rootDirs.firstOrNull { dir ->
+                if (dir.uri.toString() in claimedDirs) return@firstOrNull false
+                dirFilesMap[dir.uri.toString()].orEmpty().any {
+                    it.normName == normSample || it.name.equals(sample.filename, ignoreCase = true)
+                }
+            }
+        }
+        if (courseDir != null) claimedDirs += courseDir.uri.toString()
+        return courseDir
+    }
 }
 
 /**

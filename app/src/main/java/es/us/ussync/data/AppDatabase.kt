@@ -375,14 +375,15 @@ interface CatalogDao {
         documents: List<EvDocument>,
         previousSnapshot: Map<String, RemoteDocumentEntity>,
         blockedExtensions: Set<String> = emptySet(),
+        recognizedKeys: Set<String> = emptySet(),
     ): ChangeSummary {
         if (documents.isEmpty()) return ChangeSummary(0, 0, 0, 0)
         val now = Instant.now().toString()
         val changes = documents.map { document ->
-            document to classifyEvChange(document, previousSnapshot[document.key])
+            document to classifyEvChange(document, previousSnapshot[document.key], alreadyDownloadedKeys = recognizedKeys)
         }
         upsertDocuments(documents.map { document ->
-            evDocumentEntity(document, previousSnapshot[document.key], isRecognized = false, now = now)
+            evDocumentEntity(document, previousSnapshot[document.key], document.key in recognizedKeys, now)
         })
         var newCount = 0
         var updatedCount = 0

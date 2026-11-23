@@ -136,18 +136,27 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             if (!forceDownload) SyncLocks.scan.withLock {
                 val courseIds = courses.map { it.remoteId }
                 val previous = catalog.documentsForCourses(courseIds).associateBy { it.key }
+                val libraryTree = catalog.setting("library_tree_uri")
+                val localIndex = LocalLibraryIndex(
+                    applicationContext,
+                    libraryTree,
+                    courses.associate { it.remoteId to it.folder },
+                    courses.associate { it.remoteId to it.name },
+                )
+                val earlyRecognized = mutableSetOf<String>()
                 val documents = client.documents(
                     user,
                     courses.map { EvCourse(it.remoteId, it.name, it.remoteId, it.folder) },
                     catalog,
                 ) { batch ->
-                    catalog.recordDiscoveredDocuments(batch, previous, blocked)
+                    val recognized = batch.filter { localIndex.alreadyExists(it) }.map { it.key }.toSet()
+                    earlyRecognized += recognized
+                    catalog.recordDiscoveredDocuments(batch, previous, blocked, recognized)
                 }
-                val libraryTree = catalog.setting("library_tree_uri")
                 val courseFolders = courses.mapNotNull { c -> c.folder?.let { c.remoteId to it } }.toMap()
                 val existingFiles = catalog.reconcileExistingLibraryFiles(applicationContext, libraryTree, documents, courseFolders)
                 val missingDownloads = catalog.reconcileMissingDownloads(applicationContext, libraryTree)
-                catalog.recordEvScan(documents, courseIds, missingDownloads, blocked, existingFiles, previous)
+                catalog.recordEvScan(documents, courseIds, missingDownloads, blocked, existingFiles + earlyRecognized, previous)
                 catalog.putSetting(AppSettingsEntity("last_scan", Instant.now().toString()))
             }
             val rules = catalog.savedRules()
